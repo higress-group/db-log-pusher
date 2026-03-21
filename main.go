@@ -35,7 +35,7 @@ func init() {
 
 // PluginConfig 定义插件配置 (对应 WasmPlugin 资源中的 pluginConfig)
 type PluginConfig struct {
-	CollectorServiceName string             `json:"collector_service_name"` // fqdn,例如 "log-collector.higress-system.svc.cluster.local"
+	CollectorServiceName string             `json:"collector_service_name"` // Collector 完整 FQDN，如 "log-collector.higress-system.svc.cluster.local"
 	CollectorPort       int64              `json:"collector_port"`    // Collector 端口，例如 8080
 	CollectorPath       string             `json:"collector_path"`    // 接收日志的 API 路径，例如 "/api/log"
 	CollectorClient     wrapper.HttpClient `json:"-"`                 // HTTP 客户端，用于发送日志
@@ -124,9 +124,9 @@ func parseConfig(jsonConf gjson.Result, config *PluginConfig) error {
 	
 	// 创建 HTTP 客户端用于发送日志
 	log.Debugf("[db-log-pusher] creating cluster client: service=%s, port=%d", config.CollectorServiceName, config.CollectorPort)
-	config.CollectorClient = wrapper.NewClusterClient(wrapper.DnsCluster{
-		ServiceName: config.CollectorServiceName,
-		Port:        config.CollectorPort,
+	config.CollectorClient = wrapper.NewClusterClient(wrapper.FQDNCluster{
+		FQDN: config.CollectorServiceName,
+		Port: config.CollectorPort,
 	})
 	
 	return nil
