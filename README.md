@@ -1,11 +1,8 @@
 ## DB 日志推送插件 (db-log-pusher) 和日志收集服务 (db-log-collector)
 
-> **源码仓库**：
-> - **主仓库**：[https://github.com/higress-group/db-log-pusher](https://github.com/higress-group/db-log-pusher) - 包含完整的插件和收集器源码
-> - **Higress 集成方式**：需要手动将源码克隆并集成到 [Higress 仓库](https://github.com/alibaba/higress/tree/main/plugins/wasm-go/extensions) 的 `plugins/wasm-go/extensions` 目录
-> - **独立插件仓库**：[https://github.com/higress-group/db-log-pusher](https://github.com/higress-group/db-log-pusher)
+`db-log-pusher` 是一个 WASM 插件，用于收集 HTTP 请求/响应日志，并将这些日志推送到外部收集器服务 (`db-log-collector`) 进行存储和分析。这两个组件共同构成了完整的日志收集解决方案。
 
-`db-log-pusher` 是一个 WASM 插件，用于收集 HTTP 请求/响应日志，并将这些日志推送到外部收集器服务 (`db-log-collector`) 进行存储和分析。这两个组件共同构成了完整的日志收集解决方案。该插件能够捕获完整的请求/响应生命周期信息，并将其发送到指定的目标服务。
+> **Higress 集成方式**：如需集成到 Higress，将本仓库代码复制到 [Higress 插件目录](https://github.com/alibaba/higress/tree/main/plugins/wasm-go/extensions) 即可。
 
 ## 一、db-log-pusher 功能特性
 
@@ -419,11 +416,7 @@ curl http://localhost:8080/health
 
 ### 4. 自定义 Log Collector（可选）
 
-如果需要自定义日志推送器的功能，可以参考源码进行修改和重新构建。
-
-**源码仓库关系：**
-- **独立仓库**：[https://github.com/higress-group/db-log-pusher](https://github.com/higress-group/db-log-pusher) - 包含完整的插件和收集器源码
-- **Higress 集成**：[https://github.com/alibaba/higress/tree/main/plugins/wasm-go/extensions](https://github.com/alibaba/higress/tree/main/plugins/wasm-go/extensions) - Higress 官方仓库中的插件目录
+如需自定义功能，可参考以下源码结构进行修改和重新构建：
 
 **源码结构：**
 ```
@@ -444,17 +437,11 @@ db-log-pusher/
 
 **构建镜像：**
 ```bash
-# 克隆 db-log-pusher 仓库
-git clone git@github.com:higress-group/db-log-pusher.git
-
-# 克隆 higress 仓库
-git clone git@github.com:alibaba/higress.git
-
-# 将 db-log-collector 目录复制到 higress 插件目录
-cp -r db-log-pusher/log-collector higress/plugins/wasm-go/extensions/db-log-pusher/
+# 复制 log-collector 到 higress 插件目录
+cp -r log-collector /path/to/higress/plugins/wasm-go/extensions/db-log-pusher/
 
 # 进入目录并构建镜像
-cd higress/plugins/wasm-go/extensions/db-log-pusher/log-collector
+cd /path/to/higress/plugins/wasm-go/extensions/db-log-pusher/log-collector
 docker build -t your-registry/log-collector:latest .
 ```
 
