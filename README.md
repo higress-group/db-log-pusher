@@ -497,3 +497,7 @@ docker build -t your-registry/log-collector:latest .
 对于更复杂的部署场景，您可以根据需要调整以下参数：
 - `collector_path`: 根据您的日志收集服务 API 路径进行调整
 - 配合其他监控工具进行日志格式化和处理
+
+## HiMarket集成
+
+> 更多详细信息请参考官方文档：[HiMarket db-log-pusher 插件文档](https://higress.cn/docs/himarket/himarket-db-log-pusher/)
