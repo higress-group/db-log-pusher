@@ -19,7 +19,7 @@ jobs:
     env:
       IMAGE_REGISTRY_SERVICE: ${{ vars.IMAGE_REGISTRY || 'higress-registry.cn-hangzhou.cr.aliyuncs.com' }}
       IMAGE_REPOSITORY: ${{ vars.COLLECTOR_IMAGE_REPOSITORY || 'log-collector' }}
-      COLLECTOR_NAME: db-log-collector
+      COLLECTOR_NAME: log-collector
     steps:
       - name: Set version
         id: set_vars
