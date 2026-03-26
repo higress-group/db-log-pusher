@@ -122,6 +122,69 @@ const (
 	BizTypeModelAPI  = "MODEL_API"
 )
 
+// 建表 SQL 语句（源自 init.sql）
+const createTableSQL = `CREATE TABLE IF NOT EXISTS access_logs (
+  id bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  start_time timestamp NULL DEFAULT NULL COMMENT '请求开始时间',
+  trace_id varchar(64) NULL DEFAULT NULL COMMENT 'X-B3-TraceID 分布式追踪ID',
+  authority varchar(128) NULL DEFAULT NULL COMMENT 'Host/Authority 域名',
+  method varchar(16) NULL DEFAULT NULL COMMENT 'HTTP 方法 (GET/POST等)',
+  path varchar(1024) NULL DEFAULT NULL COMMENT '请求路径',
+  protocol varchar(16) NULL DEFAULT NULL COMMENT 'HTTP 协议版本 (HTTP/1.1等)',
+  request_id varchar(64) NULL DEFAULT NULL COMMENT 'X-Request-ID 请求唯一标识',
+  user_agent varchar(512) NULL DEFAULT NULL COMMENT 'User-Agent 客户端信息',
+  x_forwarded_for varchar(256) NULL DEFAULT NULL COMMENT 'X-Forwarded-For 客户端真实IP',
+  response_code int NULL DEFAULT NULL COMMENT '响应状态码 (200/404/500等)',
+  response_flags varchar(64) NULL DEFAULT NULL COMMENT 'Envoy 响应标志',
+  response_code_details varchar(256) NULL DEFAULT NULL COMMENT '响应码详情',
+  bytes_received bigint NULL DEFAULT NULL COMMENT '接收字节数',
+  bytes_sent bigint NULL DEFAULT NULL COMMENT '发送字节数',
+  duration int NULL DEFAULT NULL COMMENT '请求总耗时(ms)',
+  upstream_cluster varchar(256) NULL DEFAULT NULL COMMENT '上游集群名',
+  upstream_host varchar(256) NULL DEFAULT NULL COMMENT '上游主机地址',
+  upstream_service_time varchar(32) NULL DEFAULT NULL COMMENT '上游服务耗时',
+  upstream_transport_failure_reason varchar(256) NULL DEFAULT NULL COMMENT '上游传输失败原因',
+  upstream_local_address varchar(64) NULL DEFAULT NULL COMMENT '上游本地地址',
+  downstream_local_address varchar(64) NULL DEFAULT NULL COMMENT '下游本地地址',
+  downstream_remote_address varchar(64) NULL DEFAULT NULL COMMENT '下游远程地址',
+  route_name varchar(256) NULL DEFAULT NULL COMMENT '路由名称',
+  requested_server_name varchar(256) NULL DEFAULT NULL COMMENT 'SNI 服务器名称',
+  istio_policy_status varchar(64) NULL DEFAULT NULL COMMENT 'Istio 策略状态',
+  ai_log json NULL DEFAULT NULL COMMENT 'WASM AI 日志 (JSON字符串)',
+  instance_id varchar(128) NULL DEFAULT NULL COMMENT '实例ID（Pod名称或容器ID）',
+  api varchar(128) NULL DEFAULT NULL COMMENT 'API名称（如 chat/completions）',
+  model varchar(128) NULL DEFAULT NULL COMMENT '模型名称（如 qwen-max）',
+  consumer varchar(256) NULL DEFAULT NULL COMMENT '消费者信息（用户名/API Key等）',
+  route varchar(256) NULL DEFAULT NULL COMMENT '路由名称（冗余字段，便于查询）',
+  service varchar(256) NULL DEFAULT NULL COMMENT '服务名称（上游服务）',
+  mcp_server varchar(256) NULL DEFAULT NULL COMMENT 'MCP服务器名称',
+  mcp_tool varchar(256) NULL DEFAULT NULL COMMENT 'MCP工具名称',
+  input_tokens bigint NULL DEFAULT NULL COMMENT '输入token数量',
+  output_tokens bigint NULL DEFAULT NULL COMMENT '输出token数量',
+  total_tokens bigint NULL DEFAULT NULL COMMENT '总token数量',
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='HTTP 访问日志表'`
+
+// 创建索引 SQL 语句列表
+var createIndexSQLs = []string{
+	"CREATE INDEX IF NOT EXISTS idx_start_time ON access_logs (start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_trace_id ON access_logs (trace_id)",
+	"CREATE INDEX IF NOT EXISTS idx_authority_time ON access_logs (authority, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_response_code_time ON access_logs (response_code, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_path ON access_logs (path(255))",
+	"CREATE INDEX IF NOT EXISTS idx_method_authority ON access_logs (method, authority)",
+	"CREATE INDEX IF NOT EXISTS idx_duration ON access_logs (duration DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_upstream_cluster ON access_logs (upstream_cluster, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_route_name ON access_logs (route_name, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_instance_id ON access_logs (instance_id, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_api ON access_logs (api, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_model ON access_logs (model, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_consumer ON access_logs (consumer, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_service ON access_logs (service, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_mcp_server ON access_logs (mcp_server, start_time DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_mcp_tool ON access_logs (mcp_tool, start_time DESC)",
+}
+
 func main() {
 	// 2. 初始化数据库连接
 	dsn := os.Getenv("MYSQL_DSN")
@@ -144,6 +207,11 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	} else {
 		log.Println("Database connected successfully")
+	}
+
+	// 2.5 自动创建表结构（如果不存在）
+	if err := initDatabase(); err != nil {
+		log.Fatalf("Failed to initialize database schema: %v", err)
 	}
 
 	// 3. 启动后台 Flush 协程（定时刷新）
@@ -179,6 +247,45 @@ func main() {
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// initDatabase 初始化数据库表结构（如果不存在则创建）
+func initDatabase() error {
+	log.Println("[Init] Checking database schema...")
+
+	// 检查表是否存在
+	var tableName string
+	err := db.QueryRow("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'access_logs'").Scan(&tableName)
+
+	if err == sql.ErrNoRows {
+		// 表不存在，需要创建
+		log.Println("[Init] Table 'access_logs' not found, creating...")
+
+		// 创建表
+		_, err = db.Exec(createTableSQL)
+		if err != nil {
+			return fmt.Errorf("failed to create table: %w", err)
+		}
+		log.Println("[Init] ✓ Table 'access_logs' created successfully")
+
+		// 创建索引
+		for i, idxSQL := range createIndexSQLs {
+			_, err = db.Exec(idxSQL)
+			if err != nil {
+				// 索引创建失败可能是已存在，记录警告但不中断
+				log.Printf("[Init] ⚠ Index %d creation warning: %v", i+1, err)
+			} else {
+				log.Printf("[Init] ✓ Index %d/%d created", i+1, len(createIndexSQLs))
+			}
+		}
+		log.Printf("[Init] ✓ Database schema initialized successfully")
+	} else if err != nil {
+		return fmt.Errorf("failed to check table existence: %w", err)
+	} else {
+		log.Println("[Init] ✓ Table 'access_logs' already exists")
+	}
+
+	return nil
 }
 
 // 接收 Wasm 发来的日志
