@@ -436,12 +436,23 @@ db-log-pusher/
 - 支持丰富的查询参数（时间范围、实例 ID、API、模型、MCP Server 等）
 
 **构建镜像：**
-```bash
-# 复制 log-collector 到 higress 插件目录
-cp -r log-collector /path/to/higress/plugins/wasm-go/extensions/db-log-pusher/
 
-# 进入目录并构建镜像
-cd /path/to/higress/plugins/wasm-go/extensions/db-log-pusher/log-collector
+方式一：GitHub Actions 自动构建（推荐）
+
+推送标签即可触发自动构建：
+
+```bash
+# 发布新版本
+git tag collector-v1.2.3
+git push origin collector-v1.2.3
+```
+
+镜像将自动推送到：`higress-registry.cn-hangzhou.cr.aliyuncs.com/log-collector/db-log-collector:1.2.3`
+
+方式二：本地手动构建
+
+```bash
+cd log-collector
 docker build -t your-registry/log-collector:latest .
 ```
 
