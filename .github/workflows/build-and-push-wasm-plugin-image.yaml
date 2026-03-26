@@ -50,14 +50,10 @@ jobs:
 
           echo "PUSH_COMMAND=\"$push_command\"" >> $GITHUB_ENV
 
-      - name: Run a wasm-builder
-        env:
-          PLUGIN_NAME: ${{ env.PLUGIN_NAME }}
-          BUILDER_IMAGE: ${{ env.BUILDER_IMAGE }}
-        run: |
-          docker run -itd --name builder -v ${{ github.workspace }}:/workspace -e PLUGIN_NAME=${{ env.PLUGIN_NAME }} --rm ${{ env.BUILDER_IMAGE }} /bin/bash
-
       - name: Build Image and Push
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
           push_command=${{ env.PUSH_COMMAND }}
           push_command=${push_command#\"}
@@ -69,14 +65,23 @@ jobs:
           echo "TargetImageLatest=${target_image_latest}"
 
           cd ${{ github.workspace }}
-          command="
-          set -e
-          cd /workspace
-          go mod tidy
-          GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
-          tar czvf plugin.tar.gz plugin.wasm
-          echo ${{ secrets.REGISTRY_PASSWORD }} | oras login -u ${{ secrets.REGISTRY_USERNAME }} --password-stdin ${{ env.IMAGE_REGISTRY_SERVICE }}
-          oras push ${target_image} ${push_command}
-          oras push ${target_image_latest} ${push_command}
-          "
-          docker exec builder bash -c "$command"
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -e PLUGIN_NAME=${{ env.PLUGIN_NAME }} \
+            -e REGISTRY_USERNAME=${{ secrets.REGISTRY_USERNAME }} \
+            -e REGISTRY_PASSWORD=${{ secrets.REGISTRY_PASSWORD }} \
+            -e IMAGE_REGISTRY_SERVICE=${{ env.IMAGE_REGISTRY_SERVICE }} \
+            -e target_image=${target_image} \
+            -e target_image_latest=${target_image_latest} \
+            -e push_command="${push_command}" \
+            ${{ env.BUILDER_IMAGE }} \
+            bash -c "
+              set -e
+              cd /workspace
+              go mod tidy
+              GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
+              tar czvf plugin.tar.gz plugin.wasm
+              echo \$REGISTRY_PASSWORD | oras login -u \$REGISTRY_USERNAME --password-stdin \$IMAGE_REGISTRY_SERVICE
+              oras push \${target_image} \${push_command}
+              oras push \${target_image_latest} \${push_command}
+            "
