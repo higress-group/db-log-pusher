@@ -15,7 +15,7 @@ jobs:
   build-and-push-wasm-plugin-image:
     runs-on: ubuntu-latest
     env:
-      IMAGE_REGISTRY_SERVICE: ${{ vars.IMAGE_REGISTRY || 'higress-registry.cn-hangzhou.cr.aliyuncs.com' }}
+      IMAGE_REGISTRY_SERVICE: ${{ vars.IMAGE_REGISTRY || 'opensource-registry.cn-hangzhou.cr.aliyuncs.com' }}
       IMAGE_REPOSITORY: ${{ vars.PLUGIN_IMAGE_REPOSITORY || 'plugins' }}
       PLUGIN_NAME: db-log-pusher
       GO_VERSION: 1.24.0
