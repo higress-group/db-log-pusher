@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -9,13 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/higress-group/proxy-wasm-go-sdk/properties"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/higress-group/wasm-go/pkg/log"
 	"github.com/higress-group/wasm-go/pkg/tokenusage"
 	"github.com/higress-group/wasm-go/pkg/wrapper"
 	"github.com/tidwall/gjson"
-	"github.com/higress-group/proxy-wasm-go-sdk/properties"
 )
 
 func main() {}
@@ -27,11 +28,22 @@ func init() {
 		wrapper.ProcessRequestHeaders(onHttpRequestHeaders),
 		wrapper.ProcessRequestBody(onHttpRequestBody),
 		wrapper.ProcessResponseHeaders(onHttpResponseHeaders),
+		wrapper.ProcessStreamingResponseBody(onHttpStreamingResponseBody),
 		wrapper.ProcessResponseBody(onHttpResponseBody),
+		wrapper.ProcessStreamDone(onHttpStreamDone),
 		wrapper.WithRebuildAfterRequests[PluginConfig](1000),
 		wrapper.WithRebuildMaxMemBytes[PluginConfig](200*1024*1024),
 	)
 }
+
+// context key 常量
+const (
+	ctxStreamingBodyBuffer = "streaming_body_buffer" // SSE 累积缓冲区 (*bytes.Buffer)
+	ctxStreamingBytesSent  = "streaming_bytes_sent"  // 流式响应累加字节数 (int64)
+	ctxFirstByteTime       = "first_byte_time_ms"    // 首字节到达时间戳 (int64, UnixMilli)
+	ctxLogSent             = "log_sent"              // 日志发送幂等标记 (bool)
+	ctxIsStreaming         = "is_streaming"          // 是否为流式响应 (bool)
+)
 
 // PluginConfig 定义插件配置 (对应 WasmPlugin 资源中的 pluginConfig)
 type PluginConfig struct {
@@ -61,10 +73,11 @@ type LogEntry struct {
 	ResponseCodeDetails string `json:"response_code_details,omitempty"` // 响应码详情
 	
 	// 流量信息
-	BytesReceived int64 `json:"bytes_received"` // 接收字节数
-	BytesSent     int64 `json:"bytes_sent"`     // 发送字节数
-	Duration      int64 `json:"duration"`       // 请求总耗时(ms)
-	
+	BytesReceived int64 `json:"bytes_received"`            // 接收字节数
+	BytesSent     int64 `json:"bytes_sent"`                // 发送字节数
+	Duration      int64 `json:"duration"`                  // 请求总耗时(ms)
+	FirstByteTime int64 `json:"first_byte_time,omitempty"` // 首字节响应耗时 TTFB (ms)，仅流式响应有效
+
 	// 上游信息
 	UpstreamCluster              string `json:"upstream_cluster,omitempty"`                // 上游集群名
 	UpstreamHost                 string `json:"upstream_host,omitempty"`                   // 上游主机
@@ -168,7 +181,88 @@ func onHttpRequestBody(ctx wrapper.HttpContext, config PluginConfig, body []byte
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig) types.Action {
 	headers, _ := proxywasm.GetHttpResponseHeaders()
 	ctx.SetContext("resp_headers", headers)
+
+	contentType, _ := proxywasm.GetHttpResponseHeader("content-type")
+	transferEncoding, _ := proxywasm.GetHttpResponseHeader("transfer-encoding")
+
+	// 识别静态资源 / 二进制内容，完全跳过 body 缓冲
+	if isStaticOrBinaryResponse(contentType) {
+		log.Debugf("[db-log-pusher] skipping body for static/binary response (content-type=%s)", contentType)
+		ctx.DontReadResponseBody()
+		return types.ActionContinue
+	}
+
+	// 流式响应检测：SSE / NDJSON / JSON-Seq 等
+	if isStreamingResponse(contentType, transferEncoding) {
+		ctx.SetContext(ctxIsStreaming, true)
+		log.Debugf("[db-log-pusher] detected streaming response (content-type=%s, transfer-encoding=%s), using streaming mode",
+			contentType, transferEncoding)
+	} else {
+		// 非流式：回退到完整缓冲模式，由 onHttpResponseBody 处理
+		ctx.BufferResponseBody()
+	}
+
 	return types.ActionContinue
+}
+
+// isStaticOrBinaryResponse 判断是否为静态资源 / 二进制内容
+func isStaticOrBinaryResponse(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if ct == "" {
+		return false
+	}
+	// 图片 / 字体 / 音视频 / wasm / 通用二进制
+	if strings.HasPrefix(ct, "image/") ||
+		strings.HasPrefix(ct, "font/") ||
+		strings.HasPrefix(ct, "video/") ||
+		strings.HasPrefix(ct, "audio/") ||
+		strings.Contains(ct, "octet-stream") ||
+		strings.Contains(ct, "wasm") {
+		return true
+	}
+	// 前端静态资源：CSS / JS / 字体相关
+	if strings.Contains(ct, "text/css") ||
+		strings.Contains(ct, "text/javascript") ||
+		strings.Contains(ct, "application/javascript") ||
+		strings.Contains(ct, "application/x-javascript") ||
+		strings.Contains(ct, "application/ecmascript") ||
+		strings.Contains(ct, "font") {
+		return true
+	}
+	// PDF / zip / 压缩包等二进制文档
+	if strings.Contains(ct, "application/pdf") ||
+		strings.Contains(ct, "application/zip") ||
+		strings.Contains(ct, "application/x-tar") ||
+		strings.Contains(ct, "application/gzip") ||
+		strings.Contains(ct, "application/x-7z-compressed") {
+		return true
+	}
+	return false
+}
+
+// isStreamingResponse 判断响应是否为流式
+func isStreamingResponse(contentType, transferEncoding string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	te := strings.ToLower(strings.TrimSpace(transferEncoding))
+
+	// 经典 SSE
+	if strings.Contains(ct, "text/event-stream") {
+		return true
+	}
+	// NDJSON / JSONL / JSON-Seq 等流式 JSON 协议
+	if strings.Contains(ct, "application/x-ndjson") ||
+		strings.Contains(ct, "application/stream+json") ||
+		strings.Contains(ct, "application/jsonl") ||
+		strings.Contains(ct, "application/json-seq") {
+		return true
+	}
+	// chunked + JSON 流（某些 LLM 上游不带正式 SSE 头但实际是 chunked 流式）
+	if strings.Contains(te, "chunked") && strings.HasPrefix(ct, "application/json") {
+		// 注意：普通短 JSON 响应也可能是 chunked，这里偏保守仅在确实需要时启用
+		// 默认不返回 true 避免误判，留作占位说明
+		_ = te
+	}
+	return false
 }
 
 // 4. 处理响应体 (也是发送日志的最佳时机)
@@ -177,6 +271,90 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config PluginConfig) types.A
 // ai-statistics 执行。不同 phase 下建议使用 AUTHN；同 phase 下 priority
 // 应高于 ai-statistics。
 func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byte) types.Action {
+	sendLog(ctx, config, body)
+	return types.ActionContinue
+}
+
+// 5. 处理 SSE 流式响应体 (每个 chunk 即时回调，必须立即返回 chunk 转发给客户端)
+// 此回调用于规避 wrapper 中"未注册流式回调时遇到 endOfStream=false 即 return ActionPause"的阻塞行为。
+// 累积的 chunk 仅用于在流结束时记录完整响应体到日志，不影响实际响应转发。
+func onHttpStreamingResponseBody(ctx wrapper.HttpContext, config PluginConfig, chunk []byte, endOfStream bool) []byte {
+
+	// 这里所有错误均被吞掉，仅记录日志，不打断响应转发
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("[db-log-pusher] onHttpStreamingResponseBody panic recovered: %v", r)
+		}
+	}()
+
+	// 首字节时间 (TTFB) - 第一次收到非空 chunk 时记录
+	if len(chunk) > 0 {
+		if _, ok := ctx.GetContext(ctxFirstByteTime).(int64); !ok {
+			ctx.SetContext(ctxFirstByteTime, time.Now().UnixMilli())
+		}
+	}
+
+	// 使用 *bytes.Buffer 替代 []byte append，减少频繁内存重分配
+	// 类型断言失败也能安全恢复
+	buf, ok := ctx.GetContext(ctxStreamingBodyBuffer).(*bytes.Buffer)
+	if !ok || buf == nil {
+		buf = &bytes.Buffer{}
+		ctx.SetContext(ctxStreamingBodyBuffer, buf)
+	}
+	if len(chunk) > 0 {
+		buf.Write(chunk)
+	}
+
+	// 累加 bytes_sent —— SSE 场景下 response.total_size / Content-Length 均不可靠
+	bytesSent, _ := ctx.GetContext(ctxStreamingBytesSent).(int64)
+	bytesSent += int64(len(chunk))
+	ctx.SetContext(ctxStreamingBytesSent, bytesSent)
+
+	// 流结束时，从缓冲区取出完整响应体并发送日志
+	if endOfStream {
+		log.Debugf("[db-log-pusher] SSE stream ended, total buffered body size=%d, bytes_sent=%d",
+			buf.Len(), bytesSent)
+		sendLog(ctx, config, buf.Bytes())
+	}
+
+	return chunk
+}
+
+// onHttpStreamDone Envoy 关闭 HTTP 流时的兜底回调（包括客户端断开等异常路径）
+func onHttpStreamDone(ctx wrapper.HttpContext, config PluginConfig) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("[db-log-pusher] onHttpStreamDone panic recovered: %v", r)
+		}
+	}()
+
+	// 幂等：已在正常路径发送过日志则跳过
+	if sent, _ := ctx.GetContext(ctxLogSent).(bool); sent {
+		return
+	}
+
+	// 仅对流式响应做兜底；非流式由 onHttpResponseBody 处理
+	if streaming, _ := ctx.GetContext(ctxIsStreaming).(bool); !streaming {
+		return
+	}
+
+	var body []byte
+	if buf, ok := ctx.GetContext(ctxStreamingBodyBuffer).(*bytes.Buffer); ok && buf != nil {
+		body = buf.Bytes()
+	}
+	log.Debugf("[db-log-pusher] stream done fallback triggered, buffered body size=%d", len(body))
+	sendLog(ctx, config, body)
+}
+
+// sendLog 组装 LogEntry 并异步推送给 Collector
+func sendLog(ctx wrapper.HttpContext, config PluginConfig, body []byte) {
+	// 幂等标记：防止流式正常结束 + 兜底回调重复发送
+	if sent, _ := ctx.GetContext(ctxLogSent).(bool); sent {
+		log.Debugf("[db-log-pusher] sendLog skipped (already sent)")
+		return
+	}
+	ctx.SetContext(ctxLogSent, true)
+
 	// 1. 组装数据 - 参考 Envoy accessLogFormat 字段
 	reqHeaders, _ := ctx.GetContext("req_headers").([][2]string)
 	reqBody, _ := ctx.GetContext("req_body").(string)
@@ -203,7 +381,16 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 	// 获取 Envoy 属性
 	protocol := getEnvoyProperty("request.protocol", "HTTP/1.1")
 	bytesReceived := getEnvoyPropertyInt64("request.total_size", 0)
-	bytesSent := getResponseTotalSize()
+
+	// bytes_sent 优先使用流式累加值（SSE 场景下 response.total_size 不可靠）
+	var bytesSent int64
+	if streamedBytes, ok := ctx.GetContext(ctxStreamingBytesSent).(int64); ok && streamedBytes > 0 {
+		bytesSent = streamedBytes
+		log.Debugf("[db-log-pusher] bytes_sent from streaming accumulator: %d", bytesSent)
+	} else {
+		bytesSent = getResponseTotalSize()
+	}
+
 	responseFlags := getResponseFlags()
 	responseCodeDetails := getEnvoyProperty("response.code_details", "")
 	upstreamCluster := getEnvoyProperty("cluster_name", "")
@@ -241,7 +428,15 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 	
 	// 计算耗时
 	duration := time.Now().UnixMilli() - startTime
-	
+
+	// #7 计算首字节响应耗时 TTFB（仅流式场景）
+	var firstByteTime int64
+	if ttfbTs, ok := ctx.GetContext(ctxFirstByteTime).(int64); ok && ttfbTs > 0 && startTime > 0 {
+		firstByteTime = ttfbTs - startTime
+		if firstByteTime < 0 {
+			firstByteTime = 0
+		}
+	}
 	// ⚠️ 先不读取 AI 日志，等到最后再读取
 	// 因为 ai-statistics 在 onHttpResponseBody 的最后才写入
 	
@@ -266,7 +461,8 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 		BytesReceived: bytesReceived,
 		BytesSent:     bytesSent,
 		Duration:      duration,
-		
+		FirstByteTime: firstByteTime,
+
 		// 上游信息
 		UpstreamCluster:          upstreamCluster,
 		UpstreamHost:             upstreamHost,
@@ -361,7 +557,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 	payload, err := json.Marshal(entry)
 	if err != nil {
 		log.Errorf("[db-log-pusher] failed to marshal log entry: %v", err)
-		return types.ActionContinue
+		return
 	}
 	
 	log.Debugf("[db-log-pusher] marshaled payload length: %d, payload: %s", len(payload), string(payload))
@@ -369,7 +565,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 	// 检查 payload 是否为空
 	if len(payload) == 0 {
 		log.Errorf("[db-log-pusher] marshaled payload is empty!")
-		return types.ActionContinue
+		return
 	}
 	
 	// 使用 wrapper.HttpClient.Post 方法，它会自动处理 headers
@@ -402,7 +598,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config PluginConfig, body []byt
 		log.Errorf("[db-log-pusher] failed to dispatch http call: %v", postErr)
 	}
 
-	return types.ActionContinue
+	return
 }
 
 // 辅助工具：Header 数组转 Map
