@@ -87,6 +87,8 @@
 - `request_body`: 请求体
 - `response_body`: 响应体
 
+响应体逐块透传，不会为了写访问日志而缓存完整响应。日志字段 `resp_body` 最多记录前 16 KiB；超过上限时 `resp_body_truncated` 为 `true`。插件还会保留末尾 16 KiB 以尝试提取大响应末尾的 token 用量，但不会将末尾样本写入 `resp_body`。这不改变客户端收到的响应正文。
+
 ## 配置方式
 
 ### 方式一：通过 Higress Console 配置（推荐）
